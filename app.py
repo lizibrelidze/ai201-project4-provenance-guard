@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 
 from audit_log import append_log_entry, get_log
-from signals import combine_scores, compute_signal1
+from signals import combine_scores, compute_signal1, compute_signal2
 
 app = Flask(__name__)
 
@@ -33,10 +33,13 @@ def submit():
     except Exception as exc:
         return jsonify({"error": f"signal 1 failed: {exc}"}), 502
 
-    # Only Signal 1 exists so far -- combine_scores(s1) alone already covers
-    # this via its low-coverage branch (planning.md §1.3); Signal 2 slots in
-    # as the s2 argument once it's built in M4.
-    confidence, attribution = combine_scores(llm_score)
+    stylometric_score = compute_signal2(text)
+    result = combine_scores(llm_score, stylometric_score)
+    confidence = result["confidence_score"]
+    attribution = result["band"]
+    disagreement = result["disagreement"]
+    low_coverage = result["low_coverage"]
+
     label = "pending"  # placeholder -- real label copy (planning.md §3) lands in M5
     content_id = str(uuid.uuid4())
     timestamp = iso_timestamp()
@@ -46,8 +49,11 @@ def submit():
         "creator_id": creator_id,
         "text": text,
         "llm_score": llm_score,
+        "stylometric_score": stylometric_score,
         "attribution": attribution,
         "confidence": confidence,
+        "disagreement": disagreement,
+        "low_coverage": low_coverage,
         "label": label,
         "status": "pending",  # appeal-workflow status, distinct from the log's "status"
         "created_at": timestamp,
@@ -61,6 +67,9 @@ def submit():
             "attribution": attribution,
             "confidence": confidence,
             "llm_score": llm_score,
+            "stylometric_score": stylometric_score,
+            "disagreement": disagreement,
+            "low_coverage": low_coverage,
             "status": "classified",
         }
     )
@@ -71,6 +80,7 @@ def submit():
             "attribution": attribution,
             "confidence": confidence,
             "llm_score": llm_score,
+            "stylometric_score": stylometric_score,
             "label": label,
         }
     )

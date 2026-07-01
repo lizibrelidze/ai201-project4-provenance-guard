@@ -34,23 +34,28 @@ signal's blind spot doesn't silently become the system's blind spot.
   it can drift if the prompt wording changes, and it's a single model call
   with no raw statistic underneath to sanity-check against.
 
-### Signal 2 — Burstiness (sentence-length variance, structural)
+### Signal 2 — Stylometric composite (structural, local)
 
-- **What it measures:** The variance/standard deviation of sentence length
-  (and optionally paragraph length) across the document — how much the
-  rhythm of the writing fluctuates. Computed locally, no API call.
+- **What it measures:** Two independent structural properties, combined into
+  one score. **Burstiness**: the variance/standard deviation of sentence
+  length across the document — how much the rhythm fluctuates. **Filler/
+  casual-word density**: how often the text uses casual hedge words (`like`,
+  `honestly`, `kinda`, `lol`, ...). Both computed locally, no API call. (Type-
+  token ratio was tried as a second metric alongside burstiness but didn't
+  discriminate at typical paragraph lengths — see `planning.md` §1.2 — filler
+  density replaced it.)
 - **Why it differs human vs. AI:** Human writing mirrors thought: short
-  fragments next to long meandering sentences, asides, corrections. A single
-  LLM generation pass tends to produce more uniform sentence construction
-  because each sentence is generated under similar local constraints and
-  decoding settings.
+  fragments next to long meandering sentences, asides, corrections, plus
+  casual hedge words. A single LLM generation pass tends to produce more
+  uniform sentence construction and skips casual filler words entirely.
 - **Blind spot:** Same failure population as Signal 1 — technical writing,
   legal contracts, and non-native speakers following a template are
-  naturally *low-burstiness* even when human-written. It's also purely
-  syntactic: it looks at sentence shape, not meaning, so it can't tell
-  AI-drafted-then-heavily-edited text from purely human text if the editor
-  varies sentence length. And it's easy to defeat by explicitly prompting an
-  LLM to vary sentence length.
+  naturally *low-burstiness* and filler-free even when human-written. It's
+  also purely syntactic/lexical: it looks at sentence shape and word choice,
+  not meaning, so it can't tell AI-drafted-then-heavily-edited text from
+  purely human text if the editor varies sentence length or adds casual
+  words. And it's easy to defeat by explicitly prompting an LLM to vary
+  sentence length or write more casually.
 
 **Design consequence:** both signals share the same false-positive
 population (formulaic / non-native / domain-constrained human writers).
@@ -99,7 +104,7 @@ another automated score.
 
 | Endpoint | Method | Accepts | Returns |
 |---|---|---|---|
-| `/submit` | POST | `{ text, creator_id?, metadata? }` | `{ content_id, label, confidence, band, signals: { llm_judgment, burstiness }, created_at }` |
+| `/submit` | POST | `{ text, creator_id?, metadata? }` | `{ content_id, label, confidence, band, signals: { llm_judgment, stylometric }, created_at }` |
 | `/submissions/<id>` | GET | — | same shape as `/submit` response, current state |
 | `/submissions/<id>/audit` | GET | — | `{ content_id, signal_scores, combined_score, model_version, label_history[], timestamps }` |
 | `/appeal` | POST | `{ content_id, reason, evidence? }` | `{ appeal_id, content_id, status: "pending", submitted_at }` |
@@ -118,7 +123,7 @@ Notes:
 ```mermaid
 flowchart LR
     A[POST /submit\nraw text] --> B[Signal 1: LLM judgment\nscore via Groq]
-    A --> C[Signal 2: burstiness\nlocal sentence-length variance]
+    A --> C[Signal 2: stylometric\nburstiness + filler density]
     B -->|signal_1 score| D[Confidence scoring\ncombine + margin/agreement]
     C -->|signal_2 score| D
     D -->|combined score + band| E[Transparency label\nhedged text + band]

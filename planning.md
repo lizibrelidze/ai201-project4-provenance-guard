@@ -39,23 +39,54 @@ information the confidence scoring in §2 depends on.
   showing the signal discriminates in the expected direction, not a
   calibrated accuracy measurement.
 
-### 1.2 Signal 2 — Burstiness (structural, local, no API call)
+### 1.2 Signal 2 — Stylometric composite (structural, local, no API call)
 
-- **Measures:** coefficient of variation (CoV) of sentence length across the
-  document — how uniform vs. bursty the rhythm is.
+- **Measures:** two independent stylometric properties, combined into one
+  score:
+  1. **Burstiness** — coefficient of variation (CoV) of sentence length
+     across the document, i.e. how uniform vs. bursty the rhythm is.
+  2. **Filler/casual-word density** — fraction of words drawn from a small
+     set of casual/hedge markers (`like`, `honestly`, `kinda`, `lol`, `just`,
+     ...).
+  (Originally speced as burstiness alone. Type-token ratio was tried as a
+  second metric and measured on the four M4 test paragraphs, but at
+  ~40–55-word paragraph lengths TTR barely varied — 0.86–0.90 across a
+  clearly-AI, clearly-human, and two borderline samples — there isn't enough
+  text at that length for repetition patterns to show up. Filler-word density
+  measured on the same four samples actually discriminated (0.091 on the
+  casual sample vs. 0.000 on all three formal-register ones), so it replaced
+  TTR.)
 - **Computation:**
   ```
   sentences = sentence_tokenize(text)
-  if len(sentences) < MIN_SENTENCES:      # MIN_SENTENCES = 4
+  if len(sentences) < MIN_SENTENCES:      # MIN_SENTENCES = 3
       s2 = None                            # insufficient data, see §5.2
   else:
-      lengths  = [word_count(s) for s in sentences]
-      cov      = stdev(lengths) / mean(lengths)
-      s2 = 1 / (1 + exp((cov - COV_MID) / COV_SCALE))
+      lengths        = [word_count(s) for s in sentences]
+      cov            = stdev(lengths) / mean(lengths)
+      burst          = 1 / (1 + exp((cov - COV_MID) / COV_SCALE))
+
+      density        = filler_word_count(text) / word_count(text)
+      filler         = 1 / (1 + exp((density - FILLER_MID) / FILLER_SCALE))
+
+      s2 = 0.65 * burst + 0.35 * filler   # burstiness weighted higher: it's
+                                           # the better-understood metric;
+                                           # filler density is a secondary
+                                           # casualness catch
   ```
-  Initial calibration constants: `COV_MID = 0.45`, `COV_SCALE = 0.15`.
+  Calibration constants: `COV_MID = 0.45`, `COV_SCALE = 0.15`,
+  `FILLER_MID = 0.02`, `FILLER_SCALE = 0.02` (all placeholders pending a
+  labeled-set calibration pass, same caveat as §2.2).
+  `MIN_SENTENCES` was lowered from an initial placeholder of 4 to 3 after
+  testing on the four M4 samples showed 3 of them (2–3 sentences each) are
+  realistic paragraph lengths, not the "very short" edge case §5.2 is about
+  — gating Signal 2 out for ordinary 3-sentence submissions defeated the
+  point of having two signals. A 2-sentence input still falls back to
+  single-signal mode, which is correct.
 - **Output:** float 0–1, or `None` when the document is too short to produce
-  a meaningful variance estimate.
+  a meaningful variance estimate. `signals.compute_signal2_debug` exposes the
+  raw `cov`, `burst_component`, `filler_density`, and `filler_component`
+  separately, for diagnosing which sub-metric is driving a given score.
 
 ### 1.3 Combining into one confidence score
 
@@ -211,7 +242,7 @@ reviewer needs to decide **without re-running anything**:
     "text_preview": "first ~300 chars, full text available on click-through",
     "band": "likely-ai-assisted",
     "confidence_score": 0.78,
-    "signals": { "s1_llm_judgment": 0.82, "s2_burstiness": 0.71, "disagreement": 0.11 },
+    "signals": { "s1_llm_judgment": 0.82, "s2_stylometric": 0.71, "disagreement": 0.11 },
     "model_version": "groq/<model-id>@<date>",
     "submitted_at": "..."
   }
@@ -262,7 +293,7 @@ the piece, not a symptom of machine generation.
 ### 5.2 Very short submissions (statistical floor, not a bias)
 
 A one-sentence product review, a tweet, or a haiku doesn't contain enough
-sentences to compute a meaningful variance for Signal 2 — `MIN_SENTENCES = 4`
+sentences to compute a meaningful variance for Signal 2 — `MIN_SENTENCES = 3`
 already guards against a nonsense CoV value, but that guard means short
 text is scored on Signal 1 *alone*, with damped confidence (`low_coverage`
 in §1.3). The system will never confidently call a short text either way; it
@@ -311,9 +342,9 @@ no warning to the caller that the score is out of the calibration domain.
               v                                   v
     +-------------------+              +----------------------+
     | Signal 1:          |              | Signal 2:             |
-    | LLM judgment score  |              | burstiness             |
-    | (Groq chat call,    |              | (local, sentence-      |
-    |  json_schema output)|              |  length variance)      |
+    | LLM judgment score  |              | stylometric composite  |
+    | (Groq chat call,    |              | (local, burstiness +   |
+    |  json_schema output)|              |  filler density)       |
     +-------------------+              +----------------------+
               |                                   |
               | s1 (0-1)                          | s2 (0-1) or None
@@ -443,7 +474,8 @@ buried inside a route.
   in directly instead of describing it in my own words, so the tool builds
   exactly that math and not something close to it.
 - **What I'll ask for:** a function `compute_signal2(text) -> float | None`
-  for burstiness (including the "too short to score" rule from §1.2), and a
+  for the stylometric composite (including the "too short to score" rule
+  from §1.2), and a
   function `combine_scores(s1, s2) -> (confidence_score, band)` that does
   the combine-and-damp math from §1.3 and picks a band using §2.3.
 - **What I'll check:** I'll pick a few texts I'm sure are AI-written and a
