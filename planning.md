@@ -12,20 +12,32 @@ Two signals, both normalized to a `0.0–1.0` float where **higher = more
 AI-like**. Neither is a binary flag — binary flags throw away the margin
 information the confidence scoring in §2 depends on.
 
-### 1.1 Signal 1 — Perplexity (model-based, via Groq)
+### 1.1 Signal 1 — LLM judgment score (model-based, via Groq)
 
-- **Measures:** how predictable the text's tokens are under a reference LLM,
-  queried through the Groq API with per-token `logprobs`.
-- **Computation:**
-  ```
-  avg_logprob = mean(token_logprob for token in text)
-  raw_ppl     = exp(-avg_logprob)          # stored as-is in the audit log
-  s1 = 1 / (1 + exp((raw_ppl - PPL_MID) / PPL_SCALE))
-  ```
-  Initial calibration constants: `PPL_MID = 20`, `PPL_SCALE = 6` (placeholders
-  until tuned against a labeled calibration set — see §2.2).
-- **Output:** float 0–1. `raw_ppl` is also logged so recalibration doesn't
-  require re-querying Groq.
+- **Measures:** a reference LLM's own stylistic judgment of how AI-like the
+  text reads — predictability of word choice, uniformity of sentence
+  structure, generic/formulaic phrasing — reported directly as a 0–1 number.
+  (Originally specced as raw perplexity via per-token `logprobs`; switched
+  because Groq does not currently support `logprobs`/`echo` on any hosted
+  model, so token-level probabilities of arbitrary input text aren't
+  obtainable through the API. Same role in the pipeline, same output shape,
+  different mechanism for getting there.)
+- **Computation:** send the text to Groq chat completions with a system
+  prompt instructing the model to judge writing style only (not content
+  correctness) and return a single number 0.0–1.0, enforced via Groq's
+  `json_schema` structured-output mode (`{"ai_likelihood": <float>}`) so the
+  response always parses. `temperature=0` for determinism. See
+  `signals.py::compute_signal1` (prompt in `build_signal1_prompt`, parsing/
+  clamping in `parse_signal1_response`, both testable without hitting the
+  API; the live call is isolated in `compute_signal1` itself).
+- **Output:** float 0–1, clamped. The model's raw JSON reply is logged
+  alongside it.
+- **Calibration note:** there's no `PPL_MID`/`PPL_SCALE`-style constant here
+  — calibration lives in the prompt wording instead. Verified informally
+  against two hand-picked samples (a clearly-formulaic AI paragraph scored
+  `0.8`, a clearly-casual human paragraph scored `0.1`); this is a smoke test
+  showing the signal discriminates in the expected direction, not a
+  calibrated accuracy measurement.
 
 ### 1.2 Signal 2 — Burstiness (structural, local, no API call)
 
@@ -70,8 +82,9 @@ shouting different answers should produce **less** certainty, not a
 confident-looking midpoint.
 
 `confidence_score` is the single number stored, returned, and banded in §2.
-`s1`, `s2`, `raw_ppl`, `disagreement`, and `low_coverage` are all written to
-the audit log alongside it.
+`s1`, `s2`, disagreement, and `low_coverage` are all written to the audit
+log alongside it, along with Signal 1's raw model reply and Signal 2's raw
+`cov` value.
 
 ## 2. Uncertainty representation
 
@@ -92,15 +105,21 @@ AI, but only a little."
 
 ### 2.2 Mapping raw signal output to a calibrated score
 
-The sigmoid normalization in §1.1/§1.2 *is* the calibration step — it maps an
-unbounded raw statistic (perplexity, coefficient of variation) onto a 0–1
-scale centered at a midpoint chosen from expected typical values. These
-midpoints (`PPL_MID`, `COV_MID`) are **placeholders** for launch; before
-relying on this in production, they need to be fit against a small labeled
-set (e.g. 50 known-human + 50 known-AI samples) by picking the midpoint that
-best separates the two groups' raw statistic distributions. Until that
-calibration pass happens, this is flagged as a known limitation, not treated
-as ground truth.
+The two signals are calibrated differently now that Signal 1 isn't a math
+transform of a raw statistic:
+
+- **Signal 2** still works the way §1.2 describes: the sigmoid normalization
+  maps the unbounded coefficient-of-variation statistic onto 0–1, centered on
+  `COV_MID`. That midpoint is a **placeholder** for launch; before relying on
+  it in production it needs to be fit against a small labeled set (e.g. 50
+  known-human + 50 known-AI samples) by picking the midpoint that best
+  separates the two groups' CoV distributions.
+- **Signal 1** has no equivalent constant to tune — the model returns a 0–1
+  judgment directly, so "calibration" means tuning the prompt wording in
+  `signals.SIGNAL1_SYSTEM_PROMPT` against the same labeled set, not fitting a
+  midpoint. This was smoke-tested (not calibrated) against two hand-picked
+  samples — see §1.1 — and is flagged as a known limitation until a real
+  labeled-set pass happens.
 
 ### 2.3 Thresholds / bands
 
@@ -143,14 +162,14 @@ don't impose anything on the creator to contest.
 
 ### 4.1 Who can appeal
 
-Whoever holds the `submission_id` (an unguessable UUID issued at submission
+Whoever holds the `content_id` (an unguessable UUID issued at submission
 time — it functions as a capability token, no separate account system
 required for this milestone). Any band can be appealed, though in practice
 almost all appeals will target `likely-ai-assisted`.
 
 ### 4.2 What they submit
 
-`POST /appeal` with `{ submission_id, reason }`. `reason` is required,
+`POST /appeal` with `{ content_id, reason }`. `reason` is required,
 minimum 20 characters (rejects empty/placeholder appeals), free text — the
 creator explains why they believe the label is wrong (e.g., "I wrote this
 myself, English is my second language and I follow a fixed essay template").
@@ -165,13 +184,13 @@ is rejected with `409 Conflict`. `/appeal` is rate-limited via
 ### 4.3 What happens on receipt
 
 1. Validate the submission exists and has no open appeal.
-2. Create an appeal record: `{ appeal_id, submission_id, reason, evidence,
+2. Create an appeal record: `{ appeal_id, content_id, reason, evidence,
    status: "pending", submitted_at }`.
 3. Update the submission's status to `appealed` (separate from its `band`,
    which is left untouched — the original algorithmic result stays visible).
 4. Write an audit log entry: `{ event: "appeal_filed", appeal_id,
-   submission_id, reason, timestamp }`.
-5. Return `{ appeal_id, submission_id, status: "pending", submitted_at }`.
+   content_id, reason, timestamp }`.
+5. Return `{ appeal_id, content_id, status: "pending", submitted_at }`.
 
 No signal is re-run at this step. Re-scoring with the same two heuristics
 would reproduce whatever mistake triggered the appeal.
@@ -184,7 +203,7 @@ reviewer needs to decide **without re-running anything**:
 ```json
 {
   "appeal_id": "...",
-  "submission_id": "...",
+  "content_id": "...",
   "reason": "...",
   "evidence": "...",
   "submitted_at": "...",
@@ -192,7 +211,7 @@ reviewer needs to decide **without re-running anything**:
     "text_preview": "first ~300 chars, full text available on click-through",
     "band": "likely-ai-assisted",
     "confidence_score": 0.78,
-    "signals": { "s1_perplexity": 0.82, "s2_burstiness": 0.71, "disagreement": 0.11 },
+    "signals": { "s1_llm_judgment": 0.82, "s2_burstiness": 0.71, "disagreement": 0.11 },
     "model_version": "groq/<model-id>@<date>",
     "submitted_at": "..."
   }
@@ -292,9 +311,9 @@ no warning to the caller that the score is out of the calibration domain.
               v                                   v
     +-------------------+              +----------------------+
     | Signal 1:          |              | Signal 2:             |
-    | perplexity          |              | burstiness             |
-    | (Groq API, per-     |              | (local, sentence-      |
-    |  token logprobs)    |              |  length variance)      |
+    | LLM judgment score  |              | burstiness             |
+    | (Groq chat call,    |              | (local, sentence-      |
+    |  json_schema output)|              |  length variance)      |
     +-------------------+              +----------------------+
               |                                   |
               | s1 (0-1)                          | s2 (0-1) or None
@@ -323,7 +342,7 @@ no warning to the caller that the score is out of the calibration domain.
               v                                   :
    +----------------------------------------+     :
    | Response to caller                       |<....:
-   | { submission_id, label, confidence_score,|
+   | { content_id, label, confidence_score,|
    |   band, signals, created_at }            |
    +----------------------------------------+
 ```
@@ -332,7 +351,7 @@ no warning to the caller that the score is out of the calibration domain.
 
 ```
               POST /appeal
-              { submission_id, reason, evidence? }
+              { content_id, reason, evidence? }
                         |
                         v
            +--------------------------+

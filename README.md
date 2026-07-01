@@ -13,25 +13,26 @@ Two independent, cheap-to-compute signals. They're combined later into one
 confidence score, but each is designed to fail in a *different* way so one
 signal's blind spot doesn't silently become the system's blind spot.
 
-### Signal 1 — Log-probability / perplexity (model-based)
+### Signal 1 — LLM judgment score (model-based, via Groq)
 
-- **What it measures:** How "surprised" a reference LLM (queried via the Groq
-  API, using per-token `logprobs`) is by the text — the average negative
-  log-probability of the actual tokens under the model's predicted
-  distribution. Low perplexity = the text sits in the model's high-probability
-  region.
-- **Why it differs human vs. AI:** AI text is *literally sampled* from a
-  language model's distribution, so by construction it tends to stay in
-  high-probability, low-surprise territory. Human writing has idiosyncratic
-  word choice, mid-thought pivots, typos, and rare phrasing that push
-  probability down and perplexity up.
-- **Blind spot:** Perplexity is relative to whichever model scores it, not an
-  absolute property of "humanness." Formulaic human text — legal boilerplate,
-  non-native-English academic writing, templated technical docs — is also
-  highly predictable and will score *low perplexity* even though a person
-  wrote it. This signal alone will false-positive on exactly that population.
-  It's also trivially defeated by asking the generating model to use an
-  unusual style or by light human editing afterward.
+- **What it measures:** A reference LLM's own stylistic judgment of how
+  AI-like the text reads, reported directly as a 0–1 number. (Originally
+  specced as raw perplexity via per-token `logprobs`; changed after
+  confirming Groq doesn't support `logprobs`/`echo` on any hosted model, so
+  token-level probabilities of arbitrary input text aren't obtainable
+  through the API. See `planning.md` §1.1 for the implementation.)
+- **Why it differs human vs. AI:** the same underlying intuition as
+  perplexity — AI text tends to read as more predictable, generic, and
+  structurally uniform than human writing — just judged by the model
+  directly (via a style-only prompt) instead of computed from raw token
+  probabilities.
+- **Blind spot:** it inherits perplexity's failure population — formulaic
+  human text (legal boilerplate, non-native-English academic writing,
+  templated technical docs) reads as "predictable" to a judge model too, so
+  it will false-positive on exactly that population. It also adds a new one:
+  the score now depends on how the model interprets the judging prompt, so
+  it can drift if the prompt wording changes, and it's a single model call
+  with no raw statistic underneath to sanity-check against.
 
 ### Signal 2 — Burstiness (sentence-length variance, structural)
 
@@ -98,11 +99,11 @@ another automated score.
 
 | Endpoint | Method | Accepts | Returns |
 |---|---|---|---|
-| `/submit` | POST | `{ text, creator_id?, metadata? }` | `{ submission_id, label, confidence, band, signals: { perplexity, burstiness }, created_at }` |
+| `/submit` | POST | `{ text, creator_id?, metadata? }` | `{ content_id, label, confidence, band, signals: { llm_judgment, burstiness }, created_at }` |
 | `/submissions/<id>` | GET | — | same shape as `/submit` response, current state |
-| `/submissions/<id>/audit` | GET | — | `{ submission_id, signal_scores, combined_score, model_version, label_history[], timestamps }` |
-| `/appeal` | POST | `{ submission_id, reason, evidence? }` | `{ appeal_id, submission_id, status: "pending", submitted_at }` |
-| `/appeals/<id>` | GET | — | `{ appeal_id, submission_id, status, reviewer_notes?, resolved_at? }` |
+| `/submissions/<id>/audit` | GET | — | `{ content_id, signal_scores, combined_score, model_version, label_history[], timestamps }` |
+| `/appeal` | POST | `{ content_id, reason, evidence? }` | `{ appeal_id, content_id, status: "pending", submitted_at }` |
+| `/appeals/<id>` | GET | — | `{ appeal_id, content_id, status, reviewer_notes?, resolved_at? }` |
 | `/appeals/<id>/resolve` | POST (reviewer-only) | `{ decision: "upheld" \| "overturned", reviewer_notes }` | `{ appeal_id, status: "resolved", decision, resolved_at }` |
 
 Notes:
@@ -116,7 +117,7 @@ Notes:
 
 ```mermaid
 flowchart LR
-    A[POST /submit\nraw text] --> B[Signal 1: perplexity\nvia Groq logprobs]
+    A[POST /submit\nraw text] --> B[Signal 1: LLM judgment\nscore via Groq]
     A --> C[Signal 2: burstiness\nlocal sentence-length variance]
     B -->|signal_1 score| D[Confidence scoring\ncombine + margin/agreement]
     C -->|signal_2 score| D
@@ -130,7 +131,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    H[POST /appeal\nsubmission_id + reason] --> I[Status update\npending -> appealed]
+    H[POST /appeal\ncontent_id + reason] --> I[Status update\npending -> appealed]
     I -->|appeal record| J[Audit log]
     I --> K[Human reviewer\nPOST /appeals/id/resolve]
     K -->|decision + reviewer_notes| L[Status update\nappealed -> resolved]
