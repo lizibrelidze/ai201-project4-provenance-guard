@@ -386,3 +386,75 @@ upheld, overrides what's displayed without erasing the original score.
 This is the reference diagram for Milestones 3–5: any code-generation prompt
 for `/submit`, `/appeal`, or `/appeals/<id>/resolve` should point back to the
 matching flow above rather than re-deriving the shape of the pipeline.
+
+## 7. AI Tool Plan
+
+This is my plan for using an AI coding tool for M3–M5: what spec I give it,
+what I ask it to build, and how I check the result before trusting it. My
+rule for all three milestones: I never plug generated code straight into the
+endpoint. I test each piece by itself first, on a few inputs I pick myself.
+A function can look fine and still be wrong (like using the wrong number in
+a math formula), and that's much easier to catch on its own than after it's
+buried inside a route.
+
+### M3 — Submission endpoint + first signal
+
+- **Spec I'll give it:** §1.1 (the perplexity signal — the formula and the
+  numbers it uses) and the submission diagram in §6. I will not give it
+  §1.2 or §1.3 yet, since M3 only needs one signal. I don't want it adding a
+  second signal or a combine step early.
+- **What I'll ask for:** a basic Flask app with a `POST /submit` route that
+  takes `{ text, creator_id?, metadata? }`, plus a separate function
+  `compute_signal1(text) -> float` that follows the §1.1 formula step by
+  step (get logprobs from Groq → average them → turn that into a score).
+  I'll ask for the Groq call and the math as two separate pieces, so I can
+  test the math without needing to call the API every time.
+- **How I'll check it before wiring it in:** I'll run `compute_signal1` by
+  itself on a few texts I already have a guess about: something I wrote
+  myself, something copied straight from an AI chat, and one very short
+  text (from §5.2) just to make sure it doesn't crash. If the AI text
+  doesn't score clearly higher than my own writing, the formula or the
+  numbers are wrong, and I fix that before it ever touches `/submit`.
+
+### M4 — Second signal + confidence scoring
+
+- **Spec I'll give it:** all of §1 (both signals plus the combine step in
+  §1.3), §2 (how the score should be read, plus the exact bands in §2.3),
+  and the submission diagram in §6. I'm pasting the combine formula
+  in directly instead of describing it in my own words, so the tool builds
+  exactly that math and not something close to it.
+- **What I'll ask for:** a function `compute_signal2(text) -> float | None`
+  for burstiness (including the "too short to score" rule from §1.2), and a
+  function `combine_scores(s1, s2) -> (confidence_score, band)` that does
+  the combine-and-damp math from §1.3 and picks a band using §2.3.
+- **What I'll check:** I'll pick a few texts I'm sure are AI-written and a
+  few I'm sure are human-written (old emails, notes I wrote years ago), and
+  run them all through both signals and `combine_scores`. What I'm looking
+  for is a gap: the AI ones should land near `likely-ai-assisted` and the
+  human ones near `likely-human`. If everything comes back near 0.5 no
+  matter what I feed it, the signals aren't actually telling anything apart,
+  and I go back and fix the numbers before touching M5.
+
+### M5 — Production layer (labels + appeals)
+
+- **Spec I'll give it:** §3 (the three label sentences, copied in exactly as
+  written, so it doesn't write its own version) and all of §4 (who can
+  appeal, the `pending → appealed → resolved` steps, what the reviewer sees,
+  what happens on a decision), plus the appeal diagram in §6.
+- **What I'll ask for:** a function that picks the right label sentence from
+  §3 based on the band and fills in the score, plus the three routes —
+  `POST /appeal`, `GET /appeals?status=pending`, and `POST
+  /appeals/<id>/resolve` — built exactly to §4 (only one open appeal at a
+  time, the fields the reviewer's list shows, and what changes when an
+  appeal is overturned).
+- **How I'll check it:** for labels, I'll set a submission's score to 0.85,
+  then 0.5, then 0.1 by hand and confirm each one gives back the matching
+  exact sentence from §3 — and specifically check the numbers right at 0.30
+  and 0.70, since those edges are where a small mistake would quietly swap
+  two labels. For appeals, I'll walk through the whole thing by hand: submit
+  something, file an appeal, check the status is now `appealed` and that a
+  second appeal on the same submission gets rejected, then resolve it as
+  overturned and check the status becomes `resolved`, the override is set,
+  and both log entries (appeal filed, appeal resolved) actually got written.
+  If any one of those steps is missing, something in the appeal flow is
+  silently losing data.
