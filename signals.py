@@ -59,3 +59,37 @@ def compute_signal1(text, client=None, model=None):
     )
     raw_content = response.choices[0].message.content
     return parse_signal1_response(raw_content)
+
+
+# Bands from planning.md §2.3
+AI_BAND_THRESHOLD = 0.70
+HUMAN_BAND_THRESHOLD = 0.30
+# Extra damping applied when only one signal is available (planning.md §1.3)
+LOW_COVERAGE_DAMPING = 0.7
+
+
+def band_for_score(confidence_score):
+    if confidence_score >= AI_BAND_THRESHOLD:
+        return "likely-ai-assisted"
+    if confidence_score <= HUMAN_BAND_THRESHOLD:
+        return "likely-human"
+    return "uncertain"
+
+
+def combine_scores(s1, s2=None):
+    """planning.md §1.3 -- combine signal scores into one confidence_score + band."""
+    if s2 is None:
+        raw_combined = s1
+        disagreement = 0
+        low_coverage = True
+    else:
+        raw_combined = 0.6 * s1 + 0.4 * s2
+        disagreement = abs(s1 - s2)
+        low_coverage = False
+
+    confidence_score = 0.5 + (raw_combined - 0.5) * (1 - disagreement)
+    if low_coverage:
+        confidence_score = 0.5 + (confidence_score - 0.5) * LOW_COVERAGE_DAMPING
+    confidence_score = round(confidence_score, 4)
+
+    return confidence_score, band_for_score(confidence_score)
