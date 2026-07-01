@@ -102,19 +102,33 @@ another automated score.
 
 ## 3. API surface
 
+**Implemented:**
+
 | Endpoint | Method | Accepts | Returns |
 |---|---|---|---|
-| `/submit` | POST | `{ text, creator_id?, metadata? }` | `{ content_id, label, confidence, band, signals: { llm_judgment, stylometric }, created_at }` |
-| `/submissions/<id>` | GET | — | same shape as `/submit` response, current state |
-| `/submissions/<id>/audit` | GET | — | `{ content_id, signal_scores, combined_score, model_version, label_history[], timestamps }` |
-| `/appeal` | POST | `{ content_id, reason, evidence? }` | `{ appeal_id, content_id, status: "pending", submitted_at }` |
-| `/appeals/<id>` | GET | — | `{ appeal_id, content_id, status, reviewer_notes?, resolved_at? }` |
-| `/appeals/<id>/resolve` | POST (reviewer-only) | `{ decision: "upheld" \| "overturned", reviewer_notes }` | `{ appeal_id, status: "resolved", decision, resolved_at }` |
+| `/submit` | POST (rate-limited, §5) | `{ text, creator_id }` | `{ content_id, attribution, confidence, llm_score, stylometric_score, label }` |
+| `/appeal` | POST | `{ content_id, creator_reasoning }` | `{ content_id, status: "under_review", message }` |
+| `/log` | GET | `?limit=N` (optional) | `{ entries: [...] }` — newest-first audit log |
+
+**Planned, not yet built** (§4.4/§4.5 of `planning.md` — reviewer queue and
+human-adjudicated resolution):
+
+| Endpoint | Method | Accepts | Returns |
+|---|---|---|---|
+| `/appeals?status=pending` | GET | — | reviewer queue: appeal + original classification, side by side |
+| `/appeals/<id>/resolve` | POST (reviewer-only) | `{ decision: "upheld" \| "overturned", reviewer_notes }` | `{ status: "resolved", decision, resolved_at }` |
 
 Notes:
-- `band` is the uncertainty tier (`likely-human` / `uncertain` / `likely-ai-assisted`), kept separate from the raw `confidence` float so the UI never has to invent hedging language itself.
-- `/appeals/<id>/resolve` is the one place a human overrides an algorithmic label; it must never be reachable by the same code path that computes signals.
-- `flask-limiter` rate-limits `/submit` (and probably `/appeal`) to keep the Groq-backed signal from being spammed.
+- `attribution` is the uncertainty band (`likely-human` / `uncertain` /
+  `likely-ai-assisted`); `label` is the full hedged sentence for that band
+  (planning.md §3) — kept separate so the UI never has to invent hedging
+  language itself.
+- `/appeal` updates the *same* audit-log entry the original `/submit` call
+  wrote (via `content_id`), rather than creating a disconnected record — see
+  §6.
+- The planned `/appeals/<id>/resolve` is the one place a human would override
+  an algorithmic label; it must never be reachable by the same code path
+  that computes signals.
 
 ## 4. Architecture diagram
 
@@ -136,10 +150,102 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    H[POST /appeal\ncontent_id + reason] --> I[Status update\npending -> appealed]
-    I -->|appeal record| J[Audit log]
-    I --> K[Human reviewer\nPOST /appeals/id/resolve]
-    K -->|decision + reviewer_notes| L[Status update\nappealed -> resolved]
-    L -->|decision, resolved_at| J
-    L --> M[Response to caller\nappeal_id, status, decision]
+    H[POST /appeal\ncontent_id + creator_reasoning] --> I[Status update\npending -> under_review]
+    I -->|merged into existing entry| J[Audit log]
+    I --> K[Response to caller\ncontent_id, status, message]
+    K2[Human reviewer -- planned, not built\nGET /appeals, POST /appeals/id/resolve] -.-> J
 ```
+
+## 5. Rate limiting
+
+`/submit` is limited to **10 requests/minute and 100/day per client
+(IP-keyed)**, via `flask-limiter` with in-memory storage.
+
+- **10/minute**: a real writer submitting their own work — checking a draft,
+  revising, resubmitting — realistically fires a handful of requests in a
+  burst, not ten-plus in a single minute. 10/minute is generous headroom for
+  that pattern while still stopping a naive flood script cold, and it caps
+  how many Groq calls (§1.1) a single client can trigger per minute, which
+  matters since each `/submit` costs a live model call.
+- **100/day**: covers a genuinely heavy user submitting many pieces over a
+  full day (a class grading a stack of essays, a moderation queue clearing
+  backlog) without requiring a limit increase, while still bounding the
+  worst case cost of one client hammering the endpoint all day.
+
+Verified with the 12-rapid-request test (first 10 succeed, remainder
+rejected):
+
+```
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+429
+429
+```
+
+## 6. Audit log
+
+Every `/submit` call writes one structured entry (`audit_log.py`, persisted
+to `audit_log.json`, not console output) containing: `timestamp`,
+`content_id`, `creator_id`, `attribution`, `confidence`, `llm_score`,
+`stylometric_score`, `disagreement`, `low_coverage`, and `status`. Filing an
+appeal (`/appeal`) updates that *same* entry in place — `status` flips to
+`under_review` and `appeal_reasoning`/`appeal_timestamp` are added — so
+whether an appeal has been filed is visible directly on the entry, not in a
+disconnected record. Example, from `GET /log` (newest first):
+
+```json
+{
+  "entries": [
+    {
+      "attribution": "uncertain",
+      "confidence": 0.535,
+      "content_id": "5b719fa8-b203-4136-af3b-3279b611728e",
+      "creator_id": "label-test-mid",
+      "disagreement": 0,
+      "llm_score": 0.55,
+      "low_coverage": true,
+      "status": "classified",
+      "stylometric_score": null,
+      "timestamp": "2026-07-01T05:09:30.303Z"
+    },
+    {
+      "attribution": "likely-human",
+      "confidence": 0.1947,
+      "content_id": "12aa2230-0a47-40a0-878e-cee1dbdd98da",
+      "creator_id": "label-test-human",
+      "disagreement": 0.0769,
+      "llm_score": 0.2,
+      "low_coverage": false,
+      "status": "classified",
+      "stylometric_score": 0.12310268179265248,
+      "timestamp": "2026-07-01T05:09:29.721Z"
+    },
+    {
+      "appeal_reasoning": "I wrote this myself from personal experience. I am a non-native English speaker and my writing style may appear more formal than typical.",
+      "appeal_timestamp": "2026-07-01T05:09:57.074Z",
+      "attribution": "likely-ai-assisted",
+      "confidence": 0.8648,
+      "content_id": "46055383-5963-4a72-a363-92bcc48570ed",
+      "creator_id": "label-test-ai",
+      "disagreement": 0.045,
+      "llm_score": 0.9,
+      "low_coverage": false,
+      "status": "under_review",
+      "stylometric_score": 0.8550221338768422,
+      "timestamp": "2026-07-01T05:09:29.121Z"
+    }
+  ]
+}
+```
+
+The third entry shows the appeal case: `status: "under_review"` and
+`appeal_reasoning` populated, sitting alongside the original classification
+fields from the same submission.

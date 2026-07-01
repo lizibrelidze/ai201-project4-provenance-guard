@@ -200,28 +200,31 @@ almost all appeals will target `likely-ai-assisted`.
 
 ### 4.2 What they submit
 
-`POST /appeal` with `{ content_id, reason }`. `reason` is required,
-minimum 20 characters (rejects empty/placeholder appeals), free text — the
-creator explains why they believe the label is wrong (e.g., "I wrote this
-myself, English is my second language and I follow a fixed essay template").
-An optional `evidence` field (free text or a link) lets them point to drafts,
-revision history, etc.
+`POST /appeal` with `{ content_id, creator_reasoning }` (renamed from the
+original `reason` -- `creator_reasoning` is the field name the M5 spec
+actually asks for). Both required, free text — the creator explains why they
+believe the label is wrong (e.g., "I wrote this myself, English is my second
+language and I follow a fixed essay template").
 
 Constraints: one open appeal per submission at a time — a second `POST
-/appeal` on a submission that already has a `pending` or `appealed` appeal
-is rejected with `409 Conflict`. `/appeal` is rate-limited via
-`flask-limiter` to prevent spam.
+/appeal` on a submission whose status is already `under_review` is rejected
+with `409 Conflict`.
 
 ### 4.3 What happens on receipt
 
-1. Validate the submission exists and has no open appeal.
-2. Create an appeal record: `{ appeal_id, content_id, reason, evidence,
-   status: "pending", submitted_at }`.
-3. Update the submission's status to `appealed` (separate from its `band`,
-   which is left untouched — the original algorithmic result stays visible).
-4. Write an audit log entry: `{ event: "appeal_filed", appeal_id,
-   content_id, reason, timestamp }`.
-5. Return `{ appeal_id, content_id, status: "pending", submitted_at }`.
+M5 implements a simplified version of this (no separate `appeal_id`, no
+`evidence` field, no reviewer queue yet — those stay future work, §4.4/§4.5):
+
+1. Validate the `content_id` exists and has no open appeal.
+2. Update the submission's status to `under_review` (renamed from
+   `appealed`) — separate from its `band`, which is left untouched (the
+   original algorithmic result stays visible).
+3. Update that submission's existing audit-log entry **in place** — merge in
+   `status: "under_review"` and `appeal_reasoning: <creator_reasoning>`
+   rather than appending a disconnected new entry, so `GET /log` shows the
+   appeal *alongside* the original classification fields (`attribution`,
+   `confidence`, `llm_score`, `stylometric_score`) in one entry, not two.
+4. Return `{ content_id, status: "under_review", message: ... }`.
 
 No signal is re-run at this step. Re-scoring with the same two heuristics
 would reproduce whatever mistake triggered the appeal.
