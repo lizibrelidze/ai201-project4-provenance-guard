@@ -377,3 +377,41 @@ being computed from raw probabilities. Both `planning.md` and this README
 were updated to describe the actual mechanism rather than the original plan,
 specifically so the docs would tell the truth about what the code does
 instead of describing a design that turned out not to be buildable.
+
+## 11. AI usage
+
+I used Claude Code throughout this project, from the Milestone 1 planning
+docs through implementation. Two specific instances where what it produced
+first wasn't what ended up shipping:
+
+**1. Signal 1's spec'd approach didn't actually work against Groq.** I had
+it implement Signal 1 exactly as I'd written it in `planning.md`: call Groq,
+pull per-token log-probabilities for the submitted text, compute perplexity
+from those numbers. Before writing that code, it checked Groq's actual API
+support and came back with something I didn't know going in — Groq doesn't
+support `logprobs` or `echo` on any of its hosted models, so there's no way
+to get token-level probabilities for arbitrary input text out of their API
+at all. My original spec was simply not buildable as written. I told it I
+still wanted to use Groq for this signal rather than switch providers or
+drop the model-based signal entirely, so I had it implement Signal 1 as an
+LLM-judgment score instead — send the text to Groq, ask the model to
+directly output a 0–1 "how AI-like does this read" number via structured
+JSON output. Same output shape and same role in the pipeline, completely
+different mechanism than what I'd originally spec'd. I had it go back and
+rewrite the relevant parts of `planning.md` and this README so they describe
+what the code actually does instead of the original plan.
+
+**2. The second stylometric metric I asked for didn't discriminate at all.**
+For Milestone 4 I asked it to add a second metric to Signal 2 on top of
+burstiness, following the milestone's own suggestion of sentence-length
+variance plus type-token ratio. It implemented type-token ratio (TTR) first
+— the standard choice. Before wiring it in, it tested TTR on my four
+Milestone 4 example paragraphs, and the numbers came back nearly identical
+across all four (0.86–0.90) regardless of whether the sample was "clearly
+AI" or "clearly human" — at that paragraph length there just isn't enough
+text for word-repetition patterns to show up, so TTR was contributing
+nothing. I had it drop TTR and try something else; it tested filler/casual-
+word density on the same four paragraphs instead, which actually separated
+the casual sample from the three formal-register ones. That's what's in the
+final Signal 2 composite instead of TTR, and I had it write up why in
+`planning.md` §1.2 so the reasoning behind swapping it out wouldn't get lost.
