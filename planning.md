@@ -278,11 +278,111 @@ conventions. Neither signal has a language-detection step today, so
 non-English submissions get scored with English-calibrated thresholds with
 no warning to the caller that the score is out of the calibration domain.
 
-## 6. Architecture (reference)
+## 6. Architecture
 
-Full submission/appeal flow diagrams and the endpoint table live in
-`README.md` (§3–4); this document defines the numbers and copy those
-endpoints have to produce. In short: `POST /submit` runs §1's two signals →
-§1.3's combination → §2.3's band → §3's label text → audit log → response.
-`POST /appeal` and `POST /appeals/<id>/resolve` implement §4 exactly as
-specified above.
+### Submission flow
+
+```
+                        POST /submit
+                        { text, creator_id?, metadata? }
+                                |
+                                v
+              +-----------------+-----------------+
+              |                                   |
+              v                                   v
+    +-------------------+              +----------------------+
+    | Signal 1:          |              | Signal 2:             |
+    | perplexity          |              | burstiness             |
+    | (Groq API, per-     |              | (local, sentence-      |
+    |  token logprobs)    |              |  length variance)      |
+    +-------------------+              +----------------------+
+              |                                   |
+              | s1 (0-1)                          | s2 (0-1) or None
+              +-----------------+-----------------+
+                                |
+                                v
+                  +--------------------------+
+                  | Confidence scoring        |
+                  | combine (0.6*s1+0.4*s2)   |
+                  | damp toward 0.5 on         |
+                  | disagreement (see §1.3)   |
+                  +--------------------------+
+                                |
+                  combined confidence_score + band
+                                |
+              +-----------------+-----------------+
+              |                                   |
+              v                                   v
+   +----------------------+           +--------------------------+
+   | Transparency label    |           | Audit log                 |
+   | (hedged text, §3,     |           | s1, s2, raw_ppl,           |
+   |  keyed off band)      |           | disagreement, combined     |
+   +----------------------+           | score, model version,       |
+              |                        | timestamp                    |
+              |                        +--------------------------+
+              v                                   :
+   +----------------------------------------+     :
+   | Response to caller                       |<....:
+   | { submission_id, label, confidence_score,|
+   |   band, signals, created_at }            |
+   +----------------------------------------+
+```
+
+### Appeal flow
+
+```
+              POST /appeal
+              { submission_id, reason, evidence? }
+                        |
+                        v
+           +--------------------------+
+           | Status update             |
+           | pending -> appealed       |
+           +--------------------------+
+                        |
+                        | appeal record
+                        v
+                +----------------+
+                | Audit log      |
+                +----------------+
+                        |
+                        v
+           +--------------------------+
+           | Human reviewer             |
+           | GET /appeals?status=pending|
+           | sees text preview, band,   |
+           | confidence_score, s1, s2,  |
+           | disagreement (§4.4)         |
+           +--------------------------+
+                        |
+                        | POST /appeals/<id>/resolve
+                        | { decision, reviewer_notes }
+                        v
+           +--------------------------+
+           | Status update             |
+           | appealed -> resolved      |
+           +--------------------------+
+              |                    |
+   decision, resolved_at   response to caller
+              |             { appeal_id, status,
+              v               decision, resolved_at }
+        +----------------+
+        | Audit log      |
+        +----------------+
+```
+
+### Narrative
+
+A submission fans out to both signals in parallel; their raw scores meet at
+the confidence-scoring step, which produces one `confidence_score` and band
+that simultaneously drives the transparency label shown to the caller and an
+audit-log entry carrying every intermediate number needed to reconstruct the
+decision later. An appeal never re-enters the signal path — it moves the
+submission through its own `pending → appealed → resolved` status machine,
+and the only thing that can close it is a human reviewer's decision, which is
+logged with the same rigor as the original scoring and, if the appeal is
+upheld, overrides what's displayed without erasing the original score.
+
+This is the reference diagram for Milestones 3–5: any code-generation prompt
+for `/submit`, `/appeal`, or `/appeals/<id>/resolve` should point back to the
+matching flow above rather than re-deriving the shape of the pipeline.
